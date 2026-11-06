@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>K8s Node Pool Planner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+	<h1>K8s Node Pool Planner</h1>
+	<div class="toolbar">
+		<button id="add-pool">+ Node pool</button>
+		<button id="add-workload">+ Workload</button>
+		<span class="sep"></span>
+		<button id="export">Export JSON</button>
+		<button id="import">Import JSON</button>
+		<button id="reset" class="danger">Reset to example</button>
+		<input type="file" id="file" accept="application/json" hidden>
+	</div>
+</header>
+<main>
+	<aside>
+		<h2>Node pools</h2>
+		<div id="pools"></div>
+		<h2>Workloads</h2>
+		<p class="hint">CPU in millicores, memory in MiB. Limit 0 = unset (treated as the request). A workload pinned to a pool only schedules there.</p>
+		<div id="workloads"></div>
+	</aside>
+	<section id="results"></section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
