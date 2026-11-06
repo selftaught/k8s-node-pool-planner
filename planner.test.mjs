@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pack, fitPerNode, costs, poolCapacity, activeReplicas } from './planner.js';
+import { pack, fitPerNode, costs, poolCapacity, activeReplicas, maxApps } from './planner.js';
 
 const pool = (o = {}) => ({ id: 'p1', providerId: 'oci', shapeId: 'VM.Standard.E4.Flex', units: 2, memPerUnit: 8,
 	count: 2, sysCpu: 0, sysMem: 0, dsCpu: 0, dsMem: 0, maxPods: 110, ...o });
@@ -34,4 +34,16 @@ test('active % scales replicas that can scale to zero, not always-on ones', () =
 	assert.equal(activeReplicas(plan, plan.workloads[1]), 10);
 	const r = pack(plan);
 	assert.equal((r.scheduled.a || 0) + (r.unscheduled.a || 0), 3);
+});
+
+test('maxApps finds the largest app count that fits and shrinks as activity rises', () => {
+	const mk = (activePct) => ({ activePct, pools: [pool({ count: 2 })], workloads: [w({ perApp: 1, cpuReq: 1000, memReq: 100 })] });
+	// 2 nodes x 4 vCPU = 8 pods at 100% active; 10% active fits 80
+	assert.equal(maxApps(mk(100)).max, 8);
+	assert.equal(maxApps(mk(10)).max, 80);
+	assert.equal(maxApps(mk(100)).bottleneck.resource, 'cpu');
+});
+test('always-on per-app workloads do not shrink with the active %', () => {
+	const plan = { activePct: 10, pools: [pool({ count: 2 })], workloads: [w({ perApp: 1, scaleToZero: false, cpuReq: 1000, memReq: 100 })] };
+	assert.equal(maxApps(plan).max, 8);
 });

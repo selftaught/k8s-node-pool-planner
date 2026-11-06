@@ -13,6 +13,8 @@
 		<button id="add-pool">+ Node pool</button>
 		<button id="add-workload">+ Workload</button>
 		<span class="sep"></span>
+		<label class="disc" title="Number of apps on the cell; workloads with Per app &gt; 0 scale with it. Blank = use each workload's fixed replicas">Apps on cell <input type="number" id="apps" min="0" step="1" placeholder="off" style="width:80px"></label>
+		<button id="find-max" title="Set to the largest count that fits at the current active %">Find max</button>
 		<label class="disc" title="Share of scale-to-zero workloads expected to be running">Active <input type="range" id="active" min="0" max="100" step="1" value="100"><input type="number" id="active-num" min="0" max="100" step="1" value="100">%</label>
 		<label class="disc">Discount <input type="range" id="discount" min="0" max="100" step="0.5" value="0"><input type="number" id="discount-num" min="0" max="100" step="0.5" value="0">%</label>
 		<span class="sep"></span>

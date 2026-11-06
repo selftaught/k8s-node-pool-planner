@@ -2,11 +2,17 @@
 // Units: CPU in millicores, memory in MiB. Node sizes arrive as vCPU / GB(=GiB).
 import { getProvider, getShape, nodeHourly, HOURS_PER_MONTH } from './providers/index.js';
 
+/** Replicas that exist. A workload with perApp > 0 scales with the plan's app count (when one is set). */
+export function totalReplicas(plan, w) {
+	return w.perApp > 0 && plan.appCount != null ? Math.round(plan.appCount * w.perApp) : w.replicas;
+}
+
 /** Replicas expected to be running. Workloads that scale to zero follow the plan's active %; others stay fully up. */
 export function activeReplicas(plan, w) {
-	if (w.scaleToZero === false) return w.replicas;
+	const total = totalReplicas(plan, w);
+	if (w.scaleToZero === false) return total;
 	const pct = Math.min(100, Math.max(0, plan.activePct ?? 100));
-	return Math.ceil((w.replicas * pct) / 100 - 1e-9);
+	return Math.ceil((total * pct) / 100 - 1e-9);
 }
 
 export function poolCapacity(pool) {
@@ -136,4 +142,36 @@ export function poolUsage(pool, packed) {
 		memLimPct: (sum('limMem') / (cap.allocMem * n)) * 100,
 		pods: nodes.reduce((a, x) => a + x.pods.length, 0),
 	};
+}
+
+const MAX_APPS = 100000;
+
+/**
+ * Largest app count (workloads with perApp > 0 scale with it) whose active pods all fit the pools'
+ * existing nodes, at the given active %. Returns { max, capped, fixedFits, bottleneck }.
+ * max = -1 when even zero apps don't fit (the fixed workloads alone are too big).
+ */
+export function maxApps(plan, activePct = plan.activePct ?? 100) {
+	const fits = (n) => Object.keys(pack({ ...plan, activePct, appCount: n }).unscheduled).length === 0;
+	if (!fits(0)) return { max: -1, capped: false, fixedFits: false };
+	let hi = 1;
+	while (hi < MAX_APPS && fits(hi)) hi *= 2;
+	if (hi >= MAX_APPS && fits(hi)) return { max: hi, capped: true, fixedFits: true };
+	let lo = hi >> 1; // fits(lo) holds (or lo = 0)
+	while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (fits(mid)) lo = mid; else hi = mid; }
+	// What ran out at lo + 1: the pool the first unplaced workload targets, and its tighter resource.
+	const over = { ...plan, activePct, appCount: lo + 1 };
+	const r = pack(over);
+	const w = over.workloads.find((x) => r.unscheduled[x.id]);
+	const pool = (w && plan.pools.find((x) => x.id === w.pool)) || plan.pools[0];
+	let bottleneck = null;
+	if (pool) {
+		const u = poolUsage(pool, r);
+		const cap = r.caps[pool.id];
+		const podPct = (u.pods / (cap.maxPods * Math.max(1, pool.count))) * 100;
+		const opts = [['cpu', u.cpuReqPct], ['memory', u.memReqPct], ['pods', podPct]];
+		const [resource, pct] = opts.sort((a, b) => b[1] - a[1])[0];
+		bottleneck = { pool: pool.name, resource, pct };
+	}
+	return { max: lo, capped: false, fixedFits: true, bottleneck };
 }

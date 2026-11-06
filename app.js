@@ -1,5 +1,5 @@
 import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH } from './providers/index.js';
-import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas } from './planner.js';
+import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas, totalReplicas, maxApps } from './planner.js';
 
 const KEY = 'nodepool-planner:v1';
 const COLORS = ['#4f8cff', '#3ecf8e', '#f5b84b', '#b07cff', '#ff7a8a', '#36c5d6', '#e8893a', '#9acd32'];
@@ -128,7 +128,8 @@ function renderWorkloads() {
 		head.append(sw, name, del);
 		const g = el('div', 'grid');
 		g.append(
-			field(w, 'replicas', 'Replicas'),
+			field(w, 'replicas', 'Replicas (fixed)'),
+			field(w, 'perApp', 'Per app (0 = fixed count)', { step: 0.1 }),
 			field(w, 'pool', 'Run on pool', { options: [['', 'Any pool'], ...plan.pools.map((p) => [p.id, p.name])] }),
 			field(w, 'cpuReq', 'CPU request (m)'), field(w, 'cpuLim', 'CPU limit (m)'),
 			field(w, 'memReq', 'Mem request (MiB)'), field(w, 'memLim', 'Mem limit (MiB)'),
@@ -157,7 +158,7 @@ function renderResults() {
 
 	let totalNodes = 0, vcpu = 0, mem = 0;
 	for (const p of plan.pools) { const c = poolCapacity(p); totalNodes += p.count; vcpu += c.vcpu * p.count; mem += c.memGB * p.count; }
-	const totalPods = plan.workloads.reduce((a, w) => a + w.replicas, 0);
+	const totalPods = plan.workloads.reduce((a, w) => a + totalReplicas(plan, w), 0);
 	const wantPods = plan.workloads.reduce((a, w) => a + activeReplicas(plan, w), 0);
 	const zeroed = totalPods - wantPods;
 	const schedPods = Object.values(packed.scheduled).reduce((a, b) => a + b, 0);
@@ -186,6 +187,8 @@ function renderResults() {
 		<div class="stat"><span>Scaled to zero</span><b>${zeroed} <small>of ${totalPods}</small></b></div>
 		<div class="stat"><span>Pods scheduled</span><b class="${cls}">${schedPods} / ${wantPods}</b></div>
 		<div class="stat"><span>Extra nodes needed</span><b class="${extraTotal ? 'bad' : 'ok'}">${extraTotal}</b></div>`));
+
+	if (plan.workloads.some((w) => w.perApp > 0)) out.append(capacitySection(cost));
 
 	if (plan.workloads.length) {
 		out.append(el('div', 'legend', plan.workloads.map((w) => `<span><i class="swatch" style="background:${w.color}"></i>${esc(w.name)}</span>`).join('')
@@ -236,7 +239,7 @@ function renderResults() {
 			const frac = ((w.cpuReq * n) / (poolTotals[pid].cpu || 1) + (w.memReq * n) / (poolTotals[pid].mem || 1)) / 2;
 			share += cost.pools[pid].monthly * frac * (1 - cost.discountPct / 100);
 		}
-		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${w.replicas}</td><td class="n">${activeReplicas(plan, w)}${w.scaleToZero === false ? ' (always on)' : ''}</td>
+		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${totalReplicas(plan, w)}</td><td class="n">${activeReplicas(plan, w)}${w.scaleToZero === false ? ' (always on)' : ''}</td>
 			<td class="n ${sched < activeReplicas(plan, w) ? 'bad' : ''}">${sched}${packed.unplaceable[w.id] ? ' (does not fit any node)' : ''}</td>
 			<td class="n">${fmt(w.cpuReq * activeReplicas(plan, w))}m / ${fmt(w.memReq * activeReplicas(plan, w))} MiB</td>
 			<td class="n">${fmt(Math.max(w.cpuLim, w.cpuReq) * activeReplicas(plan, w))}m / ${fmt(Math.max(w.memLim, w.memReq) * activeReplicas(plan, w))} MiB</td>
@@ -266,11 +269,38 @@ function renderResults() {
 	}
 	out.append(fees);
 }
+function capacitySection(cost) {
+	const box = el('div');
+	const cur = plan.activePct ?? 100;
+	const pcts = [...new Set([1, 2, 5, 10, 20, 30, 50, 100, cur])].sort((a, b) => a - b);
+	const rows = pcts.map((pct) => {
+		const r = maxApps(plan, pct);
+		const apps = r.max;
+		const b = r.bottleneck;
+		const perApp = apps > 0 ? money((cost.listMonthly * (1 - cost.discountPct / 100)) / apps) : '—';
+		return `<tr${pct === cur ? ' style="background:#1d2536"' : ''}><td>${fmt(pct, pct % 1 ? 1 : 0)}%${pct === cur ? ' (current)' : ''}</td>
+			<td class="n"><b>${apps < 0 ? 'fixed workloads do not fit' : fmt(apps) + (r.capped ? '+' : '')}</b></td>
+			<td class="n">${apps > 0 ? fmt(Math.ceil((apps * pct) / 100)) : '—'}</td>
+			<td>${b ? `${esc(b.pool)} ${b.resource} (${fmt(b.pct)}% requested)` : '—'}</td><td class="n">${perApp}</td></tr>`;
+	}).join('');
+	box.innerHTML = `<h3>Capacity: how many apps fit on this cell</h3>
+		<p class="hint">Apps = workloads with “Per app” &gt; 0 (e.g. 1 sandbox + 1 agent + 1 deployed app + 1 database each), multiplied up until something stops fitting. Scale-to-zero workloads count only their active share; always-on ones (e.g. databases) count in full. Set “Apps on cell” in the header to see a specific count laid out below.</p>
+		<table><tr><th>Active %</th><th class="n">Max apps on cell</th><th class="n">Active at once</th><th>Runs out first</th><th class="n">Cost / app / mo</th></tr>${rows}</table>`;
+	return box;
+}
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // Discount control lives in the header (outside #results) so dragging it is not interrupted by re-renders.
 const dSlider = $('#discount'), dNum = $('#discount-num');
-function syncDiscount() { dSlider.value = dNum.value = plan.discountPct || 0; aSlider.value = aNum.value = plan.activePct ?? 100; }
+const appsNum = $('#apps');
+function syncApps() { appsNum.value = plan.appCount ?? ''; }
+appsNum.onchange = () => { plan.appCount = appsNum.value === '' ? null : Math.max(0, Math.floor(Number(appsNum.value) || 0)); save(); renderResults(); };
+$('#find-max').onclick = () => {
+	const r = maxApps(plan);
+	if (r.max < 0) { alert('The fixed workloads alone do not fit on this cell.'); return; }
+	plan.appCount = r.max; syncApps(); save(); renderResults();
+};
+function syncDiscount() { syncApps(); dSlider.value = dNum.value = plan.discountPct || 0; aSlider.value = aNum.value = plan.activePct ?? 100; }
 const aSlider = $('#active'), aNum = $('#active-num');
 const setActive = (v) => { plan.activePct = Math.min(100, Math.max(0, Number(v) || 0)); syncDiscount(); save(); renderResults(); };
 aSlider.oninput = () => setActive(aSlider.value);
