@@ -18,6 +18,7 @@ export default {
 	shapes: [
 		flex('VM.Standard.E4.Flex', 'VM.Standard.E4.Flex (AMD EPYC)', 'amd64', 2, 0.025, 0.0015, 64),
 		flex('VM.Standard.E5.Flex', 'VM.Standard.E5.Flex (AMD EPYC)', 'amd64', 2, 0.03, 0.002, 94),
+		flex('VM.Standard.E6.Flex', 'VM.Standard.E6.Flex (AMD EPYC Turin)', 'amd64', 2, 0.03, 0.002, 126),
 		flex('VM.Standard3.Flex', 'VM.Standard3.Flex (Intel)', 'amd64', 2, 0.04, 0.0015, 32),
 		flex('VM.Optimized3.Flex', 'VM.Optimized3.Flex (Intel, high freq)', 'amd64', 2, 0.054, 0.0015, 18, 64),
 		flex('VM.Standard.A1.Flex', 'VM.Standard.A1.Flex (Ampere)', 'arm64', 1, 0.01, 0.0015, 80, 64),

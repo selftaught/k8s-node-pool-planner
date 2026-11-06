@@ -38,3 +38,4 @@ details { margin-top:8px; color:var(--mute); } summary { cursor:pointer; font-si
 table { border-collapse:collapse; width:100%; margin-bottom:20px; } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
 th { color:var(--mute); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.05em; } td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
 .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--mute); margin:6px 0 12px; } .legend span { display:inline-flex; gap:5px; align-items:center; }
+.disc { display:flex; align-items:center; gap:6px; color:var(--mute); } .disc input[type=range] { width:160px; padding:0; } .disc input[type=number] { width:64px; }

@@ -107,7 +107,12 @@ export function costs(plan) {
 		const fee = provider.clusterFees?.find((f) => f.id === plan.clusterFees?.[providerId]) || provider.clusterFees?.[0];
 		if (fee) { out.clusterFees.push({ providerId, name: fee.name, monthly: fee.hourly * HOURS_PER_MONTH }); out.hourly += fee.hourly; }
 	}
-	out.monthly = out.hourly * HOURS_PER_MONTH;
+	// Negotiated/committed discount off the whole bill (nodes and cluster fees), 0-100.
+	const d = Math.min(100, Math.max(0, Number(plan.discountPct) || 0)) / 100;
+	out.discountPct = d * 100;
+	out.listMonthly = out.hourly * HOURS_PER_MONTH;
+	out.discountMonthly = out.listMonthly * d;
+	out.monthly = out.listMonthly - out.discountMonthly;
 	return out;
 }
 

@@ -174,6 +174,7 @@ function renderResults() {
 	out.append(el('div', 'cards',
 		`<div class="stat"><span>Monthly cost</span><b>${money(cost.monthly, cur)}</b></div>
 		<div class="stat"><span>Annual</span><b>${money(cost.monthly * 12, cur)}</b></div>
+		<div class="stat"><span>List price / mo</span><b>${money(cost.listMonthly, cur)}</b></div>
 		<div class="stat"><span>Nodes</span><b>${totalNodes}</b></div>
 		<div class="stat"><span>Total capacity</span><b>${fmt(vcpu)} vCPU · ${fmt(mem)} GB</b></div>
 		<div class="stat"><span>Pods scheduled</span><b class="${cls}">${schedPods} / ${wantPods}</b></div>
@@ -226,7 +227,7 @@ function renderResults() {
 		for (const [pid, n] of Object.entries(poolOf[w.id] || {})) {
 			// split proportional to requests (cpu and mem averaged), over total pool cost
 			const frac = ((w.cpuReq * n) / (poolTotals[pid].cpu || 1) + (w.memReq * n) / (poolTotals[pid].mem || 1)) / 2;
-			share += cost.pools[pid].monthly * frac;
+			share += cost.pools[pid].monthly * frac * (1 - cost.discountPct / 100);
 		}
 		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${w.replicas}</td>
 			<td class="n ${sched < w.replicas ? 'bad' : ''}">${sched}${packed.unplaceable[w.id] ? ' (does not fit any node)' : ''}</td>
@@ -241,6 +242,7 @@ function renderResults() {
 	let c = '<h3>Cost breakdown</h3><table><tr><th>Item</th><th class="n">Per node / hr</th><th class="n">Per node / mo</th><th class="n">Nodes</th><th class="n">Monthly</th></tr>';
 	for (const p of plan.pools) { const x = cost.pools[p.id]; c += `<tr><td>${esc(p.name)} — ${esc(p.shapeId)}</td><td class="n">${money(x.nodeHourly)}</td><td class="n">${money(x.nodeMonthly)}</td><td class="n">${p.count}</td><td class="n">${money(x.monthly)}</td></tr>`; }
 	for (const f of cost.clusterFees) c += `<tr><td>${esc(f.name)}</td><td class="n">—</td><td class="n">—</td><td class="n">1</td><td class="n">${money(f.monthly)}</td></tr>`;
+	if (cost.discountPct) c += `<tr><td>Discount (${fmt(cost.discountPct, 1)}%)</td><td class="n">—</td><td class="n">—</td><td class="n"></td><td class="n">−${money(cost.discountMonthly)}</td></tr>`;
 	c += `<tr><th>Total (${HOURS_PER_MONTH} hrs/mo)</th><th></th><th></th><th class="n">${totalNodes}</th><th class="n">${money(cost.monthly)}</th></tr></table>`;
 	out.append(el('div', null, c));
 
@@ -259,7 +261,14 @@ function renderResults() {
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-function renderAll() { renderPools(); renderWorkloads(); renderResults(); }
+// Discount control lives in the header (outside #results) so dragging it is not interrupted by re-renders.
+const dSlider = $('#discount'), dNum = $('#discount-num');
+function syncDiscount() { dSlider.value = dNum.value = plan.discountPct || 0; }
+const setDiscount = (v) => { plan.discountPct = Math.min(100, Math.max(0, Number(v) || 0)); syncDiscount(); save(); renderResults(); };
+dSlider.oninput = () => setDiscount(dSlider.value);
+dNum.onchange = () => setDiscount(dNum.value);
+
+function renderAll() { syncDiscount(); renderPools(); renderWorkloads(); renderResults(); }
 
 // ---------- toolbar ----------
 $('#add-pool').onclick = () => { plan.pools.push(newPool()); save(); renderAll(); };
