@@ -1,5 +1,5 @@
 import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH } from './providers/index.js';
-import { pack, costs, fitPerNode, poolCapacity, poolUsage } from './planner.js';
+import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas } from './planner.js';
 
 const KEY = 'nodepool-planner:v1';
 const COLORS = ['#4f8cff', '#3ecf8e', '#f5b84b', '#b07cff', '#ff7a8a', '#36c5d6', '#e8893a', '#9acd32'];
@@ -133,8 +133,12 @@ function renderWorkloads() {
 			field(w, 'cpuReq', 'CPU request (m)'), field(w, 'cpuLim', 'CPU limit (m)'),
 			field(w, 'memReq', 'Mem request (MiB)'), field(w, 'memLim', 'Mem limit (MiB)'),
 		);
+		const z = el('label', 'derived'); z.style.cssText = 'display:flex;gap:6px;align-items:center';
+		const cb = el('input'); cb.type = 'checkbox'; cb.style.width = 'auto'; cb.checked = w.scaleToZero !== false;
+		cb.onchange = () => { w.scaleToZero = cb.checked; save(); renderResults(); };
+		z.append(cb, 'Can scale to zero (follows the active % slider)');
 		const d = el('div', 'derived'); d.id = 'wl-' + w.id;
-		card.append(head, g, d);
+		card.append(head, g, z, d);
 		root.append(card);
 	}
 }
@@ -153,7 +157,9 @@ function renderResults() {
 
 	let totalNodes = 0, vcpu = 0, mem = 0;
 	for (const p of plan.pools) { const c = poolCapacity(p); totalNodes += p.count; vcpu += c.vcpu * p.count; mem += c.memGB * p.count; }
-	const wantPods = plan.workloads.reduce((a, w) => a + w.replicas, 0);
+	const totalPods = plan.workloads.reduce((a, w) => a + w.replicas, 0);
+	const wantPods = plan.workloads.reduce((a, w) => a + activeReplicas(plan, w), 0);
+	const zeroed = totalPods - wantPods;
 	const schedPods = Object.values(packed.scheduled).reduce((a, b) => a + b, 0);
 	const unsched = wantPods - schedPods;
 	const extraTotal = Object.values(packed.extraNodes).reduce((a, b) => a + b, 0);
@@ -177,6 +183,7 @@ function renderResults() {
 		<div class="stat"><span>List price / mo</span><b>${money(cost.listMonthly, cur)}</b></div>
 		<div class="stat"><span>Nodes</span><b>${totalNodes}</b></div>
 		<div class="stat"><span>Total capacity</span><b>${fmt(vcpu)} vCPU · ${fmt(mem)} GB</b></div>
+		<div class="stat"><span>Scaled to zero</span><b>${zeroed} <small>of ${totalPods}</small></b></div>
 		<div class="stat"><span>Pods scheduled</span><b class="${cls}">${schedPods} / ${wantPods}</b></div>
 		<div class="stat"><span>Extra nodes needed</span><b class="${extraTotal ? 'bad' : 'ok'}">${extraTotal}</b></div>`));
 
@@ -191,7 +198,7 @@ function renderResults() {
 		block.append(el('h3', null, `${esc(p.name)} <small class="hint">× ${p.count}</small>`));
 		block.append(el('div', 'meta',
 			`${esc(getShape(getProvider(p.providerId), p.shapeId).name)} · ${fmt(c.vcpu)} vCPU / ${fmt(c.memGB)} GB per node · ${money(cost.pools[p.id].monthly)}/mo · ` +
-			`CPU req ${fmt(u.cpuReqPct)}% (limits ${fmt(u.cpuLimPct)}%) · Mem req ${fmt(u.memReqPct)}% (limits ${fmt(u.memLimPct)}%) · ${u.pods} pods` +
+			`${packed.nodes[p.id].filter((n) => !n.extra && n.pods.length).length}/${p.count} nodes in use · CPU req ${fmt(u.cpuReqPct)}% (limits ${fmt(u.cpuLimPct)}%) · Mem req ${fmt(u.memReqPct)}% (limits ${fmt(u.memLimPct)}%) · ${u.pods} pods` +
 			(extra ? ` · <span class="bad">needs ${extra} more node${extra > 1 ? 's' : ''} (${money(extra * cost.pools[p.id].nodeMonthly)}/mo)</span>` : '')));
 		const nodes = el('div', 'nodes');
 		packed.nodes[p.id].forEach((n, i) => {
@@ -214,7 +221,7 @@ function renderResults() {
 	}
 
 	// workload table
-	let t = '<h3>Workloads</h3><table><tr><th>App</th><th class="n">Replicas</th><th class="n">Scheduled</th><th class="n">Requests total</th><th class="n">Limits total</th><th>Max per node (by pool)</th><th class="n">Monthly cost*</th></tr>';
+	let t = '<h3>Workloads</h3><table><tr><th>App</th><th class="n">Replicas</th><th class="n">Active</th><th class="n">Scheduled</th><th class="n">Requests total</th><th class="n">Limits total</th><th>Max per node (by pool)</th><th class="n">Monthly cost*</th></tr>';
 	const poolOf = {};
 	for (const p of plan.pools) packed.nodes[p.id].forEach((n) => n.pods.forEach((id) => { (poolOf[id] ||= {})[p.id] = (poolOf[id][p.id] || 0) + 1; }));
 	const poolTotals = Object.fromEntries(plan.pools.map((p) => [p.id, { cpu: 0, mem: 0 }]));
@@ -229,10 +236,10 @@ function renderResults() {
 			const frac = ((w.cpuReq * n) / (poolTotals[pid].cpu || 1) + (w.memReq * n) / (poolTotals[pid].mem || 1)) / 2;
 			share += cost.pools[pid].monthly * frac * (1 - cost.discountPct / 100);
 		}
-		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${w.replicas}</td>
-			<td class="n ${sched < w.replicas ? 'bad' : ''}">${sched}${packed.unplaceable[w.id] ? ' (does not fit any node)' : ''}</td>
-			<td class="n">${fmt(w.cpuReq * w.replicas)}m / ${fmt(w.memReq * w.replicas)} MiB</td>
-			<td class="n">${fmt(Math.max(w.cpuLim, w.cpuReq) * w.replicas)}m / ${fmt(Math.max(w.memLim, w.memReq) * w.replicas)} MiB</td>
+		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${w.replicas}</td><td class="n">${activeReplicas(plan, w)}${w.scaleToZero === false ? ' (always on)' : ''}</td>
+			<td class="n ${sched < activeReplicas(plan, w) ? 'bad' : ''}">${sched}${packed.unplaceable[w.id] ? ' (does not fit any node)' : ''}</td>
+			<td class="n">${fmt(w.cpuReq * activeReplicas(plan, w))}m / ${fmt(w.memReq * w.replicas)} MiB</td>
+			<td class="n">${fmt(Math.max(w.cpuLim, w.cpuReq) * activeReplicas(plan, w))}m / ${fmt(Math.max(w.memLim, w.memReq) * activeReplicas(plan, w))} MiB</td>
 			<td>${max}</td><td class="n">${money(share)}</td></tr>`;
 	}
 	t += '</table><p class="hint">*Share of the monthly cost of the pools it runs on, split by requested CPU/memory.</p>';
@@ -263,7 +270,11 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 // Discount control lives in the header (outside #results) so dragging it is not interrupted by re-renders.
 const dSlider = $('#discount'), dNum = $('#discount-num');
-function syncDiscount() { dSlider.value = dNum.value = plan.discountPct || 0; }
+function syncDiscount() { dSlider.value = dNum.value = plan.discountPct || 0; aSlider.value = aNum.value = plan.activePct ?? 100; }
+const aSlider = $('#active'), aNum = $('#active-num');
+const setActive = (v) => { plan.activePct = Math.min(100, Math.max(0, Number(v) || 0)); syncDiscount(); save(); renderResults(); };
+aSlider.oninput = () => setActive(aSlider.value);
+aNum.onchange = () => setActive(aNum.value);
 const setDiscount = (v) => { plan.discountPct = Math.min(100, Math.max(0, Number(v) || 0)); syncDiscount(); save(); renderResults(); };
 dSlider.oninput = () => setDiscount(dSlider.value);
 dNum.onchange = () => setDiscount(dNum.value);

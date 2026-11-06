@@ -2,6 +2,13 @@
 // Units: CPU in millicores, memory in MiB. Node sizes arrive as vCPU / GB(=GiB).
 import { getProvider, getShape, nodeHourly, HOURS_PER_MONTH } from './providers/index.js';
 
+/** Replicas expected to be running. Workloads that scale to zero follow the plan's active %; others stay fully up. */
+export function activeReplicas(plan, w) {
+	if (w.scaleToZero === false) return w.replicas;
+	const pct = Math.min(100, Math.max(0, plan.activePct ?? 100));
+	return Math.ceil((w.replicas * pct) / 100 - 1e-9);
+}
+
 export function poolCapacity(pool) {
 	const shape = getShape(getProvider(pool.providerId), pool.shapeId);
 	const vcpu = pool.units * shape.vcpuPerUnit;
@@ -59,7 +66,7 @@ export function pack(plan) {
 		}
 	}
 	const pods = [];
-	for (const w of plan.workloads) for (let r = 0; r < w.replicas; r++) pods.push(w);
+	for (const w of plan.workloads) for (let r = 0; r < activeReplicas(plan, w); r++) pods.push(w);
 	// dominant resource share against the biggest pool, largest first
 	const ref = pools.length ? caps[pools[0].id] : { allocCpu: 1, allocMem: 1 };
 	const weight = (w) => Math.max(w.cpuReq / (ref.allocCpu || 1), w.memReq / (ref.allocMem || 1));
