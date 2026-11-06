@@ -238,7 +238,7 @@ function renderResults() {
 		}
 		t += `<tr><td><i class="swatch" style="display:inline-block;background:${w.color}"></i> ${esc(w.name)}</td><td class="n">${w.replicas}</td><td class="n">${activeReplicas(plan, w)}${w.scaleToZero === false ? ' (always on)' : ''}</td>
 			<td class="n ${sched < activeReplicas(plan, w) ? 'bad' : ''}">${sched}${packed.unplaceable[w.id] ? ' (does not fit any node)' : ''}</td>
-			<td class="n">${fmt(w.cpuReq * activeReplicas(plan, w))}m / ${fmt(w.memReq * w.replicas)} MiB</td>
+			<td class="n">${fmt(w.cpuReq * activeReplicas(plan, w))}m / ${fmt(w.memReq * activeReplicas(plan, w))} MiB</td>
 			<td class="n">${fmt(Math.max(w.cpuLim, w.cpuReq) * activeReplicas(plan, w))}m / ${fmt(Math.max(w.memLim, w.memReq) * activeReplicas(plan, w))} MiB</td>
 			<td>${max}</td><td class="n">${money(share)}</td></tr>`;
 	}
