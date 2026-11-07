@@ -175,3 +175,55 @@ export function maxApps(plan, activePct = plan.activePct ?? 100) {
 	}
 	return { max: lo, capped: false, fixedFits: true, bottleneck };
 }
+
+/**
+ * Minimum nodes each pool needs so every active replica is scheduled (requests-based), starting from
+ * empty pools: the current node counts are ignored. Pinned workloads are packed into their own pool
+ * first; workloads for "any pool" then fill the room already open in any pool (pool order) and only
+ * open a new node, in the first pool where one fits, when nothing has room.
+ * Returns { pools: { [id]: { min, current } }, totalMin, totalCurrent, unplaceable: { [workloadId]: n } }.
+ * unplaceable replicas are bigger than an empty node of every pool they may run on.
+ */
+export function minNodes(plan) {
+	const pools = plan.pools;
+	const caps = Object.fromEntries(pools.map((p) => [p.id, poolCapacity(p)]));
+	const byPool = Object.fromEntries(pools.map((p) => [p.id, []]));
+	const pods = [];
+	for (const w of plan.workloads) for (let r = 0; r < activeReplicas(plan, w); r++) pods.push(w);
+	const ref = pools.length ? caps[pools[0].id] : { allocCpu: 1, allocMem: 1 };
+	const weight = (w) => Math.max(w.cpuReq / (ref.allocCpu || 1), w.memReq / (ref.allocMem || 1));
+	pods.sort((a, b) => weight(b) - weight(a));
+
+	const unplaceable = {};
+	const lost = (w) => { unplaceable[w.id] = (unplaceable[w.id] || 0) + 1; };
+	const open = (p, w) => {
+		const node = newNode(p, caps[p.id], byPool[p.id].length);
+		if (!fits(node, w)) return false;
+		byPool[p.id].push(node); place(node, w); return true;
+	};
+	const pinned = pods.filter((w) => w.pool && pools.some((p) => p.id === w.pool));
+	// a workload naming a pool that no longer exists cannot run anywhere
+	for (const w of pods) if (w.pool && !pools.some((p) => p.id === w.pool)) lost(w);
+	const loose = pods.filter((w) => !w.pool);
+	for (const w of pinned) {
+		const p = pools.find((x) => x.id === w.pool);
+		const node = byPool[p.id].find((n) => fits(n, w));
+		if (node) place(node, w); else if (!open(p, w)) lost(w);
+	}
+	for (const w of loose) {
+		let done = false;
+		for (const p of pools) {
+			const node = byPool[p.id].find((n) => fits(n, w));
+			if (node) { place(node, w); done = true; break; }
+		}
+		if (!done) for (const p of pools) if (open(p, w)) { done = true; break; }
+		if (!done) lost(w);
+	}
+	const out = Object.fromEntries(pools.map((p) => [p.id, { min: byPool[p.id].length, current: p.count }]));
+	return {
+		pools: out,
+		totalMin: Object.values(out).reduce((a, x) => a + x.min, 0),
+		totalCurrent: pools.reduce((a, p) => a + p.count, 0),
+		unplaceable,
+	};
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pack, fitPerNode, costs, poolCapacity, activeReplicas, maxApps } from './planner.js';
+import { pack, fitPerNode, costs, poolCapacity, activeReplicas, maxApps, minNodes } from './planner.js';
 
 const pool = (o = {}) => ({ id: 'p1', providerId: 'oci', shapeId: 'VM.Standard.E4.Flex', units: 2, memPerUnit: 8,
 	count: 2, sysCpu: 0, sysMem: 0, dsCpu: 0, dsMem: 0, maxPods: 110, ...o });
@@ -46,4 +46,23 @@ test('maxApps finds the largest app count that fits and shrinks as activity rise
 test('always-on per-app workloads do not shrink with the active %', () => {
 	const plan = { activePct: 10, pools: [pool({ count: 2 })], workloads: [w({ perApp: 1, scaleToZero: false, cpuReq: 1000, memReq: 100 })] };
 	assert.equal(maxApps(plan).max, 8);
+});
+
+test('minNodes: smallest node count per pool that schedules every active replica', () => {
+	// 4 vCPU nodes: 10 x 1000m pods need 3 nodes, whatever the current count is
+	const r = minNodes({ pools: [pool({ count: 9 })], workloads: [w({ cpuReq: 1000, memReq: 100, replicas: 10 })] });
+	assert.equal(r.pools.p1.min, 3); assert.equal(r.pools.p1.current, 9); assert.equal(r.totalMin, 3);
+	assert.deepEqual(r.unplaceable, {});
+});
+test('minNodes: pinned work gets its own pool, loose work fills open room before opening a node', () => {
+	const plan = { pools: [pool(), pool({ id: 'p2' })], workloads: [
+		w({ id: 'pin', pool: 'p2', cpuReq: 3000, memReq: 100, replicas: 1 }),
+		w({ id: 'any', cpuReq: 1000, memReq: 100, replicas: 1 })] };
+	const r = minNodes(plan);
+	assert.equal(r.pools.p2.min, 1); assert.equal(r.pools.p1.min, 0); assert.equal(r.totalMin, 1);
+});
+test('minNodes: honours active % and reports replicas bigger than a node', () => {
+	const r = minNodes({ activePct: 50, pools: [pool()], workloads: [
+		w({ cpuReq: 1000, memReq: 100, replicas: 8 }), w({ id: 'huge', cpuReq: 99999, replicas: 1, scaleToZero: false })] });
+	assert.equal(r.pools.p1.min, 1); assert.equal(r.unplaceable.huge, 1);
 });

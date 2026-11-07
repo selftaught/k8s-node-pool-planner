@@ -13,6 +13,7 @@
 		<button id="add-pool">+ Node pool</button>
 		<button id="add-workload">+ Workload</button>
 		<span class="sep"></span>
+		<button id="min-nodes" class="cta" title="Work out the fewest nodes each pool needs to schedule every active workload (requests-based)">Calculate minimum nodes</button>
 		<label class="disc" title="Number of apps on the cell; workloads with Per app &gt; 0 scale with it. Blank = use each workload's fixed replicas">Apps on cell <input type="number" id="apps" min="0" step="1" placeholder="off" style="width:80px"></label>
 		<button id="find-max" title="Set to the largest count that fits at the current active %">Find max</button>
 		<label class="disc" title="Share of scale-to-zero workloads expected to be running">Active <input type="range" id="active" min="0" max="100" step="1" value="100"><input type="number" id="active-num" min="0" max="100" step="1" value="100">%</label>
@@ -20,8 +21,10 @@
 		<span class="sep"></span>
 		<button id="export">Export JSON</button>
 		<button id="import">Import JSON</button>
+		<button id="import-presets" title="Import sandbox pods from kapps-api presets.toml. Pick several files to layer them (base first, then an environment overlay such as config/layers/kapps/control/prod/kapps/presets.toml)">Import presets.toml</button>
 		<button id="reset" class="danger">Reset to example</button>
 		<input type="file" id="file" accept="application/json" hidden>
+		<input type="file" id="presets-file" accept=".toml" multiple hidden>
 	</div>
 </header>
 <main>

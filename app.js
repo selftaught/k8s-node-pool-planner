@@ -1,5 +1,7 @@
 import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH } from './providers/index.js';
-import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas, totalReplicas, maxApps } from './planner.js';
+import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas, totalReplicas, maxApps, minNodes } from './planner.js';
+
+import { parseToml, deepMerge, sandboxPods } from './presets.js';
 
 const KEY = 'nodepool-planner:v1';
 const COLORS = ['#4f8cff', '#3ecf8e', '#f5b84b', '#b07cff', '#ff7a8a', '#36c5d6', '#e8893a', '#9acd32'];
@@ -188,6 +190,7 @@ function renderResults() {
 		<div class="stat"><span>Pods scheduled</span><b class="${cls}">${schedPods} / ${wantPods}</b></div>
 		<div class="stat"><span>Extra nodes needed</span><b class="${extraTotal ? 'bad' : 'ok'}">${extraTotal}</b></div>`));
 
+	if (showMin) out.append(minNodesSection(cost));
 	if (plan.workloads.some((w) => w.perApp > 0)) out.append(capacitySection(cost));
 
 	if (plan.workloads.length) {
@@ -269,6 +272,27 @@ function renderResults() {
 	}
 	out.append(fees);
 }
+let showMin = false;
+function minNodesSection(cost) {
+	const r = minNodes(plan);
+	const box = el('div');
+	const rows = plan.pools.map((p) => {
+		const m = r.pools[p.id], delta = m.min - m.current;
+		const dcls = delta > 0 ? 'bad' : delta < 0 ? 'ok' : '';
+		return `<tr><td>${esc(p.name)}</td><td class="n">${m.current}</td><td class="n"><b>${m.min}</b></td>
+			<td class="n ${dcls}">${delta > 0 ? '+' : ''}${delta}</td><td class="n">${money(m.min * cost.pools[p.id].nodeMonthly)}</td></tr>`;
+	}).join('');
+	const lost = Object.entries(r.unplaceable);
+	const warn = lost.length ? `<p class="bad">Cannot be placed on any node of its pool (bigger than one node, or its pool was removed): ${lost.map(([id, n]) => `${esc(plan.workloads.find((w) => w.id === id)?.name || id)} × ${n}`).join(', ')}</p>` : '';
+	box.innerHTML = `<h3>Minimum nodes per pool</h3>
+		<p class="hint">Fewest nodes that schedule every active replica by requests, ignoring the current node counts. Workloads pinned to a pool are packed there; “Any pool” workloads fill room already open before a new node is added in the first pool that fits. Follows the active % and apps count. Excludes headroom for failures or surge, so add a buffer before using it as a floor.</p>
+		<table><tr><th>Pool</th><th class="n">Current</th><th class="n">Minimum</th><th class="n">Change</th><th class="n">Min cost / mo</th></tr>${rows}
+		<tr><th>Total</th><th class="n">${r.totalCurrent}</th><th class="n">${r.totalMin}</th><th class="n">${r.totalMin - r.totalCurrent}</th><th></th></tr></table>${warn}`;
+	const apply = el('button', 'cta', 'Apply minimums to pools');
+	apply.onclick = () => { plan.pools.forEach((p) => { p.count = r.pools[p.id].min; }); save(); renderAll(); };
+	box.append(apply);
+	return box;
+}
 function capacitySection(cost) {
 	const box = el('div');
 	const cur = plan.activePct ?? 100;
@@ -295,6 +319,7 @@ const dSlider = $('#discount'), dNum = $('#discount-num');
 const appsNum = $('#apps');
 function syncApps() { appsNum.value = plan.appCount ?? ''; }
 appsNum.onchange = () => { plan.appCount = appsNum.value === '' ? null : Math.max(0, Math.floor(Number(appsNum.value) || 0)); save(); renderResults(); };
+$('#min-nodes').onclick = () => { showMin = true; renderResults(); };
 $('#find-max').onclick = () => {
 	const r = maxApps(plan);
 	if (r.max < 0) { alert('The fixed workloads alone do not fit on this cell.'); return; }
@@ -329,6 +354,43 @@ $('#file').onchange = async (e) => {
 		plan = p; save(); renderAll();
 	} catch (err) { alert('Invalid plan file: ' + err.message); }
 	e.target.value = '';
+};
+
+// ---------- presets.toml import ----------
+// Files are layered in the order picked (later wins, tables merge), like kapps-api's config layers.
+// Re-importing replaces the workloads a previous import made and leaves everything else alone.
+$('#import-presets').onclick = () => $('#presets-file').click();
+$('#presets-file').onchange = async (e) => {
+	const files = [...e.target.files]; e.target.value = '';
+	if (!files.length) return;
+	try {
+		let cfg = {};
+		for (const f of files) cfg = deepMerge(cfg, parseToml(await f.text()));
+		const names = Object.keys(cfg.presets || {});
+		if (!names.length) throw new Error('no [presets.*] tables found');
+		let name = cfg.default_preset || names[0];
+		if (names.length > 1) {
+			name = prompt(`Preset to import (${names.join(', ')}):`, name);
+			if (name === null) return;
+		}
+		const r = sandboxPods(cfg, name.trim());
+		// Pin to the pool the preset's node_selector names (kapps labels pools workload=<name>); add it when absent.
+		const want = Object.values(r.nodeSelector)[0];
+		let pool = want && plan.pools.find((p) => p.name === want || p.id === want);
+		let added = false;
+		if (want && !pool) { pool = newPool({ name: want, count: 1 }); plan.pools.push(pool); added = true; }
+		plan.workloads = plan.workloads.filter((w) => !w.fromPreset);
+		for (const pod of r.pods) {
+			plan.workloads.push(newWorkload({
+				name: `${r.presetName}:${pod.name}`, cpuReq: pod.cpuReq, cpuLim: pod.cpuLim, memReq: pod.memReq, memLim: pod.memLim,
+				replicas: 0, perApp: 1, scaleToZero: true, pool: pool ? pool.id : '', fromPreset: true,
+			}));
+		}
+		save(); renderAll();
+		alert(`Imported preset ${r.presetName}: ${r.pods.map((p) => p.name).join(' + ')} per app` +
+			(pool ? `, pinned to pool "${pool.name}"${added ? ' (added; set its shape and size)' : ''}` : '') +
+			'.\nSet "Apps on cell" to size it. Each pod sums its containers (sandbox + Caddy; agent + ssh relay); init containers are left out.');
+	} catch (err) { alert('Could not import presets: ' + err.message); }
 };
 
 renderAll();
