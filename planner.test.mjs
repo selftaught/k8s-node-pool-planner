@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pack, fitPerNode, costs, poolCapacity, activeReplicas, maxApps, minNodes } from './planner.js';
+import { pack, fitPerNode, costs, poolCapacity, poolWaste, activeReplicas, maxApps, minNodes } from './planner.js';
 
 const pool = (o = {}) => ({ id: 'p1', providerId: 'oci', shapeId: 'VM.Standard.E4.Flex', units: 2, memPerUnit: 8,
 	count: 2, sysCpu: 0, sysMem: 0, dsCpu: 0, dsMem: 0, maxPods: 110, ...o });
@@ -65,4 +65,21 @@ test('minNodes: honours active % and reports replicas bigger than a node', () =>
 	const r = minNodes({ activePct: 50, pools: [pool()], workloads: [
 		w({ cpuReq: 1000, memReq: 100, replicas: 8 }), w({ id: 'huge', cpuReq: 99999, replicas: 1, scaleToZero: false })] });
 	assert.equal(r.pools.p1.min, 1); assert.equal(r.unplaceable.huge, 1);
+});
+test('poolWaste: splits each node into requested, node overhead and unrequested, priced per OCPU and GB', () => {
+	// E4 2 OCPU = 4 vCPU / 16 GB at $0.025/OCPU-hr + $0.0015/GB-hr
+	const p = pool({ count: 1, sysCpu: 300, sysMem: 724, dsCpu: 200, dsMem: 300 });
+	const plan = { pools: [p], workloads: [w({ cpuReq: 1000, memReq: 2048, replicas: 1 })] };
+	const x = poolWaste(p, pack(plan).nodes.p1);
+	assert.equal(x.overheadCpu, 500); assert.equal(x.overheadMem, 1024);
+	assert.equal(x.idleCpu, 2500); assert.equal(x.idleMem, 13312);
+	const perMilli = (2 * 0.025 * 730) / 4000, perMiB = (16 * 0.0015 * 730) / 16384;
+	assert.ok(Math.abs(x.idleMonthly - (2500 * perMilli + 13312 * perMiB)) < 1e-9);
+	assert.ok(Math.abs(x.monthly - (2 * 0.025 + 16 * 0.0015) * 730) < 1e-9);
+	assert.equal(poolWaste(p, []).idleMonthly, 0);
+});
+test('minNodes: returns the packed nodes so waste can be measured at the minimum', () => {
+	const r = minNodes({ pools: [pool({ count: 9 })], workloads: [w({ cpuReq: 1000, memReq: 100, replicas: 10 })] });
+	assert.equal(r.pools.p1.nodes.length, 3);
+	assert.equal(poolWaste(pool(), r.pools.p1.nodes).idleCpu, 3 * 4000 - 10 * 1000);
 });

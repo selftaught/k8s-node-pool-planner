@@ -144,6 +144,32 @@ export function poolUsage(pool, packed) {
 	};
 }
 
+/**
+ * What a pool's hardware holds that no pod asks for, over the given nodes (pack() or minNodes() nodes).
+ * overhead = system reserved + DaemonSets, which every node keeps and nothing can schedule on;
+ * idle = allocatable that no pod requests. CPU in millicores, memory in MiB; costs are list $/month,
+ * pricing a node's CPU and memory separately (unitPrice per OCPU, gbPrice per GB).
+ */
+export function poolWaste(pool, nodes) {
+	const provider = getProvider(pool.providerId), shape = getShape(provider, pool.shapeId), cap = poolCapacity(pool);
+	const prices = { unitPrice: pool.unitPrice, gbPrice: pool.gbPrice };
+	const perMilli = (nodeHourly(provider, shape, cap.vcpu, 0, prices) * HOURS_PER_MONTH) / (cap.cpu || 1);
+	const perMiB = (nodeHourly(provider, shape, 0, cap.memGB, prices) * HOURS_PER_MONTH) / (cap.mem || 1);
+	const n = nodes.length;
+	const sum = (k) => nodes.reduce((a, x) => a + x[k], 0);
+	const reqCpu = sum('reqCpu'), reqMem = sum('reqMem');
+	const overheadCpu = (cap.cpu - cap.allocCpu) * n, overheadMem = (cap.mem - cap.allocMem) * n;
+	const idleCpu = Math.max(0, cap.allocCpu * n - reqCpu), idleMem = Math.max(0, cap.allocMem * n - reqMem);
+	return {
+		nodes: n, cpu: cap.cpu * n, mem: cap.mem * n, reqCpu, reqMem, overheadCpu, overheadMem, idleCpu, idleMem,
+		idleCpuPct: n ? (idleCpu / (cap.cpu * n)) * 100 : 0,
+		idleMemPct: n ? (idleMem / (cap.mem * n)) * 100 : 0,
+		overheadMonthly: overheadCpu * perMilli + overheadMem * perMiB,
+		idleMonthly: idleCpu * perMilli + idleMem * perMiB,
+		monthly: (cap.cpu * perMilli + cap.mem * perMiB) * n,
+	};
+}
+
 const MAX_APPS = 100000;
 
 /**
@@ -181,7 +207,7 @@ export function maxApps(plan, activePct = plan.activePct ?? 100) {
  * empty pools: the current node counts are ignored. Pinned workloads are packed into their own pool
  * first; workloads for "any pool" then fill the room already open in any pool (pool order) and only
  * open a new node, in the first pool where one fits, when nothing has room.
- * Returns { pools: { [id]: { min, current } }, totalMin, totalCurrent, unplaceable: { [workloadId]: n } }.
+ * Returns { pools: { [id]: { min, current, nodes } }, totalMin, totalCurrent, unplaceable: { [workloadId]: n } }.
  * unplaceable replicas are bigger than an empty node of every pool they may run on.
  */
 export function minNodes(plan) {
@@ -219,7 +245,7 @@ export function minNodes(plan) {
 		if (!done) for (const p of pools) if (open(p, w)) { done = true; break; }
 		if (!done) lost(w);
 	}
-	const out = Object.fromEntries(pools.map((p) => [p.id, { min: byPool[p.id].length, current: p.count }]));
+	const out = Object.fromEntries(pools.map((p) => [p.id, { min: byPool[p.id].length, current: p.count, nodes: byPool[p.id] }]));
 	return {
 		pools: out,
 		totalMin: Object.values(out).reduce((a, x) => a + x.min, 0),

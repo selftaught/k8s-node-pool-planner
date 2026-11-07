@@ -1,5 +1,5 @@
 import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH } from './providers/index.js';
-import { pack, costs, fitPerNode, poolCapacity, poolUsage, activeReplicas, totalReplicas, maxApps, minNodes } from './planner.js';
+import { pack, costs, fitPerNode, poolCapacity, poolUsage, poolWaste, activeReplicas, totalReplicas, maxApps, minNodes } from './planner.js';
 
 import { parseToml, deepMerge, sandboxPods } from './presets.js';
 
@@ -9,6 +9,8 @@ const uid = () => Math.random().toString(36).slice(2, 8);
 const $ = (s) => document.querySelector(s);
 const fmt = (n, d = 0) => n.toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
 const money = (n, cur = 'USD') => new Intl.NumberFormat(undefined, { style: 'currency', currency: cur, maximumFractionDigits: n < 10 ? 3 : 0 }).format(n);
+const vcpus = (m) => fmt(m / 1000, 1) + ' vCPU';
+const gbs = (mib) => fmt(mib / 1024, 1) + ' GB';
 
 function newPool(over = {}) {
 	const provider = PROVIDERS[0];
@@ -166,6 +168,9 @@ function renderResults() {
 	const schedPods = Object.values(packed.scheduled).reduce((a, b) => a + b, 0);
 	const unsched = wantPods - schedPods;
 	const extraTotal = Object.values(packed.extraNodes).reduce((a, b) => a + b, 0);
+	const net = 1 - cost.discountPct / 100;
+	const waste = Object.fromEntries(plan.pools.map((p) => [p.id, poolWaste(p, packed.nodes[p.id].filter((n) => !n.extra))]));
+	const idleMonthly = Object.values(waste).reduce((a, x) => a + x.idleMonthly, 0) * net;
 
 	for (const p of plan.pools) {
 		const d = $('#derived-' + p.id); if (!d) continue;
@@ -188,9 +193,11 @@ function renderResults() {
 		<div class="stat"><span>Total capacity</span><b>${fmt(vcpu)} vCPU · ${fmt(mem)} GB</b></div>
 		<div class="stat"><span>Scaled to zero</span><b>${zeroed} <small>of ${totalPods}</small></b></div>
 		<div class="stat"><span>Pods scheduled</span><b class="${cls}">${schedPods} / ${wantPods}</b></div>
-		<div class="stat"><span>Extra nodes needed</span><b class="${extraTotal ? 'bad' : 'ok'}">${extraTotal}</b></div>`));
+		<div class="stat"><span>Extra nodes needed</span><b class="${extraTotal ? 'bad' : 'ok'}">${extraTotal}</b></div>
+		<div class="stat"><span>Unrequested / mo</span><b class="${idleMonthly > cost.monthly * 0.5 ? 'warn' : ''}">${money(idleMonthly, cur)}</b></div>`));
 
 	if (showMin) out.append(minNodesSection(cost));
+	out.append(wasteSection(waste, cost));
 	if (plan.workloads.some((w) => w.perApp > 0)) out.append(capacitySection(cost));
 
 	if (plan.workloads.length) {
@@ -205,6 +212,7 @@ function renderResults() {
 		block.append(el('div', 'meta',
 			`${esc(getShape(getProvider(p.providerId), p.shapeId).name)} · ${fmt(c.vcpu)} vCPU / ${fmt(c.memGB)} GB per node · ${money(cost.pools[p.id].monthly)}/mo · ` +
 			`${packed.nodes[p.id].filter((n) => !n.extra && n.pods.length).length}/${p.count} nodes in use · CPU req ${fmt(u.cpuReqPct)}% (limits ${fmt(u.cpuLimPct)}%) · Mem req ${fmt(u.memReqPct)}% (limits ${fmt(u.memLimPct)}%) · ${u.pods} pods` +
+			(p.count ? ` · unrequested ${vcpus(waste[p.id].idleCpu)} / ${gbs(waste[p.id].idleMem)} (${money(waste[p.id].idleMonthly * net)}/mo)` : '') +
 			(extra ? ` · <span class="bad">needs ${extra} more node${extra > 1 ? 's' : ''} (${money(extra * cost.pools[p.id].nodeMonthly)}/mo)</span>` : '')));
 		const nodes = el('div', 'nodes');
 		packed.nodes[p.id].forEach((n, i) => {
@@ -276,21 +284,57 @@ let showMin = false;
 function minNodesSection(cost) {
 	const r = minNodes(plan);
 	const box = el('div');
+	const net = 1 - cost.discountPct / 100;
+	let idleTotal = 0;
 	const rows = plan.pools.map((p) => {
-		const m = r.pools[p.id], delta = m.min - m.current;
+		const m = r.pools[p.id], delta = m.min - m.current, w = poolWaste(p, m.nodes);
 		const dcls = delta > 0 ? 'bad' : delta < 0 ? 'ok' : '';
+		idleTotal += w.idleMonthly * net;
 		return `<tr><td>${esc(p.name)}</td><td class="n">${m.current}</td><td class="n"><b>${m.min}</b></td>
-			<td class="n ${dcls}">${delta > 0 ? '+' : ''}${delta}</td><td class="n">${money(m.min * cost.pools[p.id].nodeMonthly)}</td></tr>`;
+			<td class="n ${dcls}">${delta > 0 ? '+' : ''}${delta}</td><td class="n">${money(m.min * cost.pools[p.id].nodeMonthly)}</td>
+			<td class="n">${m.min ? `${vcpus(w.idleCpu)} (${fmt(w.idleCpuPct)}%)` : '—'}</td>
+			<td class="n">${m.min ? `${gbs(w.idleMem)} (${fmt(w.idleMemPct)}%)` : '—'}</td>
+			<td class="n">${m.min ? money(w.idleMonthly * net) : '—'}</td></tr>`;
 	}).join('');
 	const lost = Object.entries(r.unplaceable);
 	const warn = lost.length ? `<p class="bad">Cannot be placed on any node of its pool (bigger than one node, or its pool was removed): ${lost.map(([id, n]) => `${esc(plan.workloads.find((w) => w.id === id)?.name || id)} × ${n}`).join(', ')}</p>` : '';
 	box.innerHTML = `<h3>Minimum nodes per pool</h3>
 		<p class="hint">Fewest nodes that schedule every active replica by requests, ignoring the current node counts. Workloads pinned to a pool are packed there; “Any pool” workloads fill room already open before a new node is added in the first pool that fits. Follows the active % and apps count. Excludes headroom for failures or surge, so add a buffer before using it as a floor.</p>
-		<table><tr><th>Pool</th><th class="n">Current</th><th class="n">Minimum</th><th class="n">Change</th><th class="n">Min cost / mo</th></tr>${rows}
-		<tr><th>Total</th><th class="n">${r.totalCurrent}</th><th class="n">${r.totalMin}</th><th class="n">${r.totalMin - r.totalCurrent}</th><th></th></tr></table>${warn}`;
+		<table><tr><th>Pool</th><th class="n">Current</th><th class="n">Minimum</th><th class="n">Change</th><th class="n">Min cost / mo</th>
+			<th class="n">Unrequested CPU</th><th class="n">Unrequested mem</th><th class="n">Unrequested / mo</th></tr>${rows}
+		<tr><th>Total</th><th class="n">${r.totalCurrent}</th><th class="n">${r.totalMin}</th><th class="n">${r.totalMin - r.totalCurrent}</th><th></th>
+			<th></th><th></th><th class="n">${money(idleTotal)}</th></tr></table>
+		<p class="hint">Unrequested = allocatable left over on the minimum nodes (the pool's whole node size, less system reserved and DaemonSets, less what pods request); the percentages are of the nodes' full hardware.</p>${warn}`;
 	const apply = el('button', 'cta', 'Apply minimums to pools');
 	apply.onclick = () => { plan.pools.forEach((p) => { p.count = r.pools[p.id].min; }); save(); renderAll(); };
 	box.append(apply);
+	return box;
+}
+function wasteSection(waste, cost) {
+	const net = 1 - cost.discountPct / 100;
+	const t = { cpu: 0, mem: 0, reqCpu: 0, reqMem: 0, overheadCpu: 0, overheadMem: 0, idleCpu: 0, idleMem: 0, overheadMonthly: 0, idleMonthly: 0 };
+	const rows = plan.pools.map((p) => {
+		const w = waste[p.id], c = poolCapacity(p);
+		for (const k of Object.keys(t)) t[k] += w[k];
+		return `<tr><td>${esc(p.name)}</td><td>${w.nodes} × ${esc(p.shapeId)} · ${fmt(c.vcpu)} vCPU / ${fmt(c.memGB)} GB</td>
+			<td class="n">${vcpus(w.cpu)} / ${gbs(w.mem)}</td>
+			<td class="n">${vcpus(w.reqCpu)} / ${gbs(w.reqMem)}</td>
+			<td class="n">${vcpus(w.overheadCpu)} / ${gbs(w.overheadMem)}</td>
+			<td class="n">${vcpus(w.idleCpu)} <small class="hint">(${fmt(w.idleCpuPct)}%)</small></td>
+			<td class="n">${gbs(w.idleMem)} <small class="hint">(${fmt(w.idleMemPct)}%)</small></td>
+			<td class="n">${money(w.overheadMonthly * net)}</td>
+			<td class="n"><b>${money(w.idleMonthly * net)}</b></td></tr>`;
+	}).join('');
+	const pct = (a, b) => (b ? fmt((a / b) * 100) : '0');
+	const box = el('div');
+	box.innerHTML = `<h3>Wasted resources</h3>
+		<p class="hint">Per pool, from each node's hardware: what pods request, what the node keeps for itself (system reserved + DaemonSets), and what is left unrequested. Counts the pool's current nodes, not the extra ones it needs. Percentages are of the full hardware; costs split each node's price into its OCPU and GB parts, after the discount.</p>
+		<table><tr><th>Pool</th><th>Hardware</th><th class="n">Total</th><th class="n">Requested</th><th class="n">Node overhead</th>
+			<th class="n">Unrequested CPU</th><th class="n">Unrequested mem</th><th class="n">Overhead / mo</th><th class="n">Unrequested / mo</th></tr>${rows}
+		<tr><th>Total</th><th></th><th class="n">${vcpus(t.cpu)} / ${gbs(t.mem)}</th><th class="n">${vcpus(t.reqCpu)} / ${gbs(t.reqMem)}</th>
+			<th class="n">${vcpus(t.overheadCpu)} / ${gbs(t.overheadMem)}</th>
+			<th class="n">${vcpus(t.idleCpu)} (${pct(t.idleCpu, t.cpu)}%)</th><th class="n">${gbs(t.idleMem)} (${pct(t.idleMem, t.mem)}%)</th>
+			<th class="n">${money(t.overheadMonthly * net)}</th><th class="n">${money(t.idleMonthly * net)}</th></tr></table>`;
 	return box;
 }
 function capacitySection(cost) {
