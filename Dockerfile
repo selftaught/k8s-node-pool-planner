@@ -2,4 +2,5 @@
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY --chown=nginx:nginx index.html style.css app.js planner.js presets.js /usr/share/nginx/html/
 COPY --chown=nginx:nginx providers/ /usr/share/nginx/html/providers/
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 8080
