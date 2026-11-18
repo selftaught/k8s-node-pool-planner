@@ -44,6 +44,15 @@
 	<div id="profiles-editor"></div>
 	<input type="file" id="profiles-file" accept="application/json" hidden>
 </dialog>
-<script type="module" src="app.js"></script>
+<script>
+	// A new URL on every load, so no cache can serve an old build. app.js's relative imports
+	// resolve under the same /v<epoch>/ prefix, which nginx strips.
+	{
+		const s = document.createElement('script');
+		s.type = 'module';
+		s.src = 'v' + Date.now() + '/app.js';
+		document.body.appendChild(s);
+	}
+</script>
 </body>
 </html>
