@@ -78,6 +78,22 @@ test('poolWaste: splits each node into requested, node overhead and unrequested,
 	assert.ok(Math.abs(x.monthly - (2 * 0.025 + 16 * 0.0015) * 730) < 1e-9);
 	assert.equal(poolWaste(p, []).idleMonthly, 0);
 });
+test('price profile: replaces list prices it sets, keeps the rest, and covers cluster fees', () => {
+	const profile = { id: 'deal', name: 'Deal', shapes: { 'oci/VM.Standard.E4.Flex': { unitPrice: 0.02 } }, fees: { 'oci/enhanced': 0.05 } };
+	const c = costs({ pools: [pool({ count: 1 })], workloads: [], clusterFees: { oci: 'enhanced' } }, profile);
+	assert.ok(Math.abs(c.pools.p1.nodeHourly - (2 * 0.02 + 16 * 0.0015)) < 1e-9);
+	assert.ok(Math.abs(c.clusterFees[0].monthly - 0.05 * 730) < 1e-9);
+	const list = costs({ pools: [pool({ count: 1 })], workloads: [], clusterFees: { oci: 'enhanced' } });
+	assert.ok(Math.abs(list.clusterFees[0].monthly - 0.1 * 730) < 1e-9);
+});
+test('price profile: a pool’s own price wins over the profile, and waste uses the same prices', () => {
+	const profile = { id: 'deal', name: 'Deal', shapes: { 'oci/VM.Standard.E4.Flex': { unitPrice: 0.02, gbPrice: 0.001 } }, fees: {} };
+	const p = pool({ count: 1, gbPrice: 0.003 });
+	const c = costs({ pools: [p], workloads: [] }, profile);
+	assert.ok(Math.abs(c.pools.p1.nodeHourly - (2 * 0.02 + 16 * 0.003)) < 1e-9);
+	const x = poolWaste(p, pack({ pools: [p], workloads: [] }).nodes.p1, profile);
+	assert.ok(Math.abs(x.monthly - (2 * 0.02 + 16 * 0.003) * 730) < 1e-9);
+});
 test('minNodes: returns the packed nodes so waste can be measured at the minimum', () => {
 	const r = minNodes({ pools: [pool({ count: 9 })], workloads: [w({ cpuReq: 1000, memReq: 100, replicas: 10 })] });
 	assert.equal(r.pools.p1.nodes.length, 3);

@@ -1,4 +1,4 @@
-import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH } from './providers/index.js';
+import { PROVIDERS, getProvider, getShape, HOURS_PER_MONTH, LIST_PROFILE, poolPrices } from './providers/index.js';
 import { pack, costs, fitPerNode, poolCapacity, poolUsage, poolWaste, activeReplicas, totalReplicas, maxApps, minNodes } from './planner.js';
 
 import { parseToml, deepMerge, sandboxPods } from './presets.js';
@@ -43,6 +43,22 @@ function example() {
 let plan = (() => { try { return JSON.parse(localStorage.getItem(KEY)) || example(); } catch { return example(); } })();
 const save = () => localStorage.setItem(KEY, JSON.stringify(plan));
 
+// Price profiles are shared by every plan (a plan only remembers which one it uses), so one
+// negotiated price list can cost every imported cell plan.
+const PROFILES_KEY = 'nodepool-planner:price-profiles';
+let profiles = (() => { try { return JSON.parse(localStorage.getItem(PROFILES_KEY)) || []; } catch { return []; } })();
+const saveProfiles = () => localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
+const activeProfile = () => profiles.find((p) => p.id === plan.priceProfileId) || LIST_PROFILE;
+const validProfile = (p) => p && typeof p.id === 'string' && p.id !== LIST_PROFILE.id && typeof p.name === 'string';
+const normProfile = (p) => ({ id: p.id, name: p.name, shapes: p.shapes || {}, fees: p.fees || {} });
+/** Adds profiles that are not here yet (by id); returns how many were added. */
+function mergeProfiles(list) {
+	let added = 0;
+	for (const p of list) if (validProfile(p) && !profiles.some((x) => x.id === p.id)) { profiles.push(normProfile(p)); added++; }
+	if (added) saveProfiles();
+	return added;
+}
+
 // ---------- form helpers ----------
 function field(obj, key, label, { type = 'number', min = 0, step = 1, onchange, wide = false, options } = {}) {
 	const l = document.createElement('label');
@@ -84,12 +100,14 @@ function renderPools() {
 		g.append(
 			field(pool, 'providerId', 'Provider', { options: PROVIDERS.map((p) => [p.id, p.name]), onchange: () => {
 				const s = getProvider(pool.providerId).shapes[0];
-				Object.assign(pool, { shapeId: s.id, units: s.defaultUnits, memPerUnit: s.defaultMemPerUnit, unitPrice: undefined, gbPrice: undefined });
+				Object.assign(pool, { shapeId: s.id, units: s.defaultUnits, memPerUnit: s.defaultMemPerUnit });
+				delete pool.unitPrice; delete pool.gbPrice;
 				save(); renderAll();
 			}, wide: true }),
 			field(pool, 'shapeId', 'Shape', { options: provider.shapes.map((s) => [s.id, s.name]), onchange: () => {
 				const s = getShape(provider, pool.shapeId);
-				Object.assign(pool, { units: s.defaultUnits, memPerUnit: s.defaultMemPerUnit ?? 0, unitPrice: undefined, gbPrice: undefined });
+				Object.assign(pool, { units: s.defaultUnits, memPerUnit: s.defaultMemPerUnit ?? 0 });
+				delete pool.unitPrice; delete pool.gbPrice;
 				save(); renderAll();
 			}, wide: true }),
 			field(pool, 'count', 'Nodes', { min: 0 }),
@@ -107,12 +125,18 @@ function renderPools() {
 			field(pool, 'dsCpu', 'DaemonSet CPU (m)'), field(pool, 'dsMem', 'DaemonSet mem (MiB)'),
 			field(pool, 'maxPods', 'Max pods / node'),
 		);
-		const up = { ...pool, unitPrice: pool.unitPrice ?? shape.unitPrice, gbPrice: pool.gbPrice ?? shape.gbPrice };
+		const up = { ...pool, ...poolPrices(pool, activeProfile()) };
 		for (const [k, label] of [['unitPrice', `$/${shape.unitLabel}-hr`], ['gbPrice', '$/GB-hr']]) {
-			const f = field(up, k, label, { step: 0.0001, onchange: () => { pool[k] = up[k]; save(); renderResults(); } });
+			const f = field(up, k, label + (pool[k] != null ? ' (this pool)' : ''), { step: 0.0001, onchange: () => { pool[k] = up[k]; save(); renderResults(); } });
 			ag.append(f);
 		}
 		adv.append(ag);
+		if (pool.unitPrice != null || pool.gbPrice != null) {
+			const reset = el('button', null, `Use “${esc(activeProfile().name)}” prices`);
+			reset.style.marginTop = '6px';
+			reset.onclick = () => { delete pool.unitPrice; delete pool.gbPrice; save(); renderPools(); renderResults(); };
+			adv.append(reset);
+		}
 		const d = el('div', 'derived'); d.id = 'derived-' + pool.id;
 		card.append(head, g, adv, d);
 		root.append(card);
@@ -156,7 +180,8 @@ function seg(w, pct, label) {
 function renderResults() {
 	// keep pool-name dropdowns on workloads in sync is done on structural change; here just compute.
 	const packed = pack(plan);
-	const cost = costs(plan);
+	const profile = activeProfile();
+	const cost = costs(plan, profile);
 	const wById = Object.fromEntries(plan.workloads.map((w) => [w.id, w]));
 	const cur = 'USD';
 
@@ -169,7 +194,7 @@ function renderResults() {
 	const unsched = wantPods - schedPods;
 	const extraTotal = Object.values(packed.extraNodes).reduce((a, b) => a + b, 0);
 	const net = 1 - cost.discountPct / 100;
-	const waste = Object.fromEntries(plan.pools.map((p) => [p.id, poolWaste(p, packed.nodes[p.id].filter((n) => !n.extra))]));
+	const waste = Object.fromEntries(plan.pools.map((p) => [p.id, poolWaste(p, packed.nodes[p.id].filter((n) => !n.extra), profile)]));
 	const idleMonthly = Object.values(waste).reduce((a, x) => a + x.idleMonthly, 0) * net;
 
 	for (const p of plan.pools) {
@@ -260,7 +285,9 @@ function renderResults() {
 	out.append(el('div', null, t));
 
 	// cost table
-	let c = '<h3>Cost breakdown</h3><table><tr><th>Item</th><th class="n">Per node / hr</th><th class="n">Per node / mo</th><th class="n">Nodes</th><th class="n">Monthly</th></tr>';
+	const overridden = plan.pools.filter((p) => p.unitPrice != null || p.gbPrice != null).length;
+	let c = `<h3>Cost breakdown <small class="hint">at “${esc(profile.name)}”${overridden ? ` · ${overridden} pool${overridden > 1 ? 's' : ''} with own prices` : ''}</small></h3><table>`;
+	c += '<tr><th>Item</th><th class="n">Per node / hr</th><th class="n">Per node / mo</th><th class="n">Nodes</th><th class="n">Monthly</th></tr>';
 	for (const p of plan.pools) { const x = cost.pools[p.id]; c += `<tr><td>${esc(p.name)} — ${esc(p.shapeId)}</td><td class="n">${money(x.nodeHourly)}</td><td class="n">${money(x.nodeMonthly)}</td><td class="n">${p.count}</td><td class="n">${money(x.monthly)}</td></tr>`; }
 	for (const f of cost.clusterFees) c += `<tr><td>${esc(f.name)}</td><td class="n">—</td><td class="n">—</td><td class="n">1</td><td class="n">${money(f.monthly)}</td></tr>`;
 	if (cost.discountPct) c += `<tr><td>Discount (${fmt(cost.discountPct, 1)}%)</td><td class="n">—</td><td class="n">—</td><td class="n"></td><td class="n">−${money(cost.discountMonthly)}</td></tr>`;
@@ -287,7 +314,7 @@ function minNodesSection(cost) {
 	const net = 1 - cost.discountPct / 100;
 	let idleTotal = 0;
 	const rows = plan.pools.map((p) => {
-		const m = r.pools[p.id], delta = m.min - m.current, w = poolWaste(p, m.nodes);
+		const m = r.pools[p.id], delta = m.min - m.current, w = poolWaste(p, m.nodes, activeProfile());
 		const dcls = delta > 0 ? 'bad' : delta < 0 ? 'ok' : '';
 		idleTotal += w.idleMonthly * net;
 		return `<tr><td>${esc(p.name)}</td><td class="n">${m.current}</td><td class="n"><b>${m.min}</b></td>
@@ -378,7 +405,121 @@ const setDiscount = (v) => { plan.discountPct = Math.min(100, Math.max(0, Number
 dSlider.oninput = () => setDiscount(dSlider.value);
 dNum.onchange = () => setDiscount(dNum.value);
 
-function renderAll() { syncDiscount(); renderPools(); renderWorkloads(); renderResults(); }
+// ---------- price profiles ----------
+const profileSel = $('#profile');
+function renderProfileSelect() {
+	profileSel.innerHTML = '';
+	for (const p of [LIST_PROFILE, ...profiles]) profileSel.add(new Option(p.name, p.id, false, p.id === activeProfile().id));
+}
+profileSel.onchange = () => { plan.priceProfileId = profileSel.value; save(); renderPools(); renderResults(); };
+
+const dialog = $('#profiles-dialog');
+let editingId = null;
+const editing = () => profiles.find((p) => p.id === editingId) || LIST_PROFILE;
+const priceInput = (value, placeholder, disabled, onset) => {
+	const i = el('input'); i.type = 'number'; i.min = 0; i.step = 0.0001;
+	i.placeholder = String(placeholder); i.disabled = disabled;
+	if (value != null) i.value = value;
+	i.addEventListener('input', () => onset(i.value === '' ? null : Math.max(0, Number(i.value) || 0)));
+	return i;
+};
+/** Re-costs the plan when the profile being edited is the one it uses (pools show its prices too). */
+const profileEdited = () => { saveProfiles(); if (editingId === activeProfile().id) { renderPools(); renderResults(); } };
+
+function renderProfileEditor() {
+	const prof = editing(), ro = !!prof.builtin;
+	const root = $('#profiles-editor'); root.innerHTML = '';
+	root.append(el('h3', null, 'Price profiles'));
+	root.append(el('p', 'hint', 'A profile sets $/hour per shape and per cluster fee; a blank price uses the list price (shown greyed). ' +
+		'Every plan can use any profile, and a pool’s own price override still wins over it. Profiles are kept in this browser; a plan you export takes its profile along.'));
+
+	const row = el('div', 'row');
+	const pick = document.createElement('select'); pick.style.width = '220px';
+	for (const p of [LIST_PROFILE, ...profiles]) pick.add(new Option(p.name + (p.id === activeProfile().id ? ' (this plan)' : ''), p.id, false, p.id === prof.id));
+	pick.onchange = () => { editingId = pick.value; renderProfileEditor(); };
+	const name = el('input'); name.type = 'text'; name.value = prof.name; name.disabled = ro;
+	name.addEventListener('input', () => { prof.name = name.value || 'Untitled'; saveProfiles(); renderProfileSelect(); });
+	const mk = (label, fn, cls) => { const b = el('button', cls, label); b.onclick = fn; return b; };
+	const create = (from) => {
+		const p = { id: 'prof-' + uid(), name: from ? from.name + ' (copy)' : 'New profile', shapes: structuredClone(from?.shapes || {}), fees: structuredClone(from?.fees || {}) };
+		profiles.push(p); saveProfiles(); editingId = p.id; renderProfileSelect(); renderProfileEditor();
+	};
+	row.append(pick, name,
+		mk('New', () => create(null)),
+		mk('Duplicate', () => create(prof)));
+	if (!ro) row.append(mk('Delete', () => {
+		if (!confirm(`Delete price profile “${prof.name}”? Plans that use it go back to list price.`)) return;
+		profiles = profiles.filter((p) => p !== prof); saveProfiles();
+		if (plan.priceProfileId === prof.id) { delete plan.priceProfileId; save(); }
+		editingId = LIST_PROFILE.id; renderProfileSelect(); renderPools(); renderResults(); renderProfileEditor();
+	}, 'danger'));
+	if (prof.id !== activeProfile().id) row.append(mk('Use for this plan', () => {
+		plan.priceProfileId = prof.id; save(); renderProfileSelect(); renderPools(); renderResults(); renderProfileEditor();
+	}, 'cta'));
+	row.append(el('span', 'sep'),
+		mk('Export profiles', () => {
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(new Blob([JSON.stringify(profiles.map(normProfile), null, 2)], { type: 'application/json' }));
+			a.download = 'nodepool-price-profiles.json'; a.click();
+		}),
+		mk('Import profiles', () => $('#profiles-file').click()),
+		mk('Close', () => dialog.close()));
+	root.append(row);
+	if (ro) root.append(el('p', 'hint', 'The built-in list price profile cannot be edited: Duplicate it, or press New, to make one you can change.'));
+
+	for (const provider of PROVIDERS) {
+		root.append(el('h3', null, esc(provider.name) + ` <small class="hint">${esc(provider.currency)}</small>`));
+		const t = el('table');
+		t.innerHTML = '<tr><th>Shape</th><th class="n">List / unit-hr</th><th class="n">Profile / unit-hr</th><th class="n">List / GB-hr</th><th class="n">Profile / GB-hr</th></tr>';
+		for (const shape of provider.shapes) {
+			const key = `${provider.id}/${shape.id}`;
+			const tr = el('tr');
+			tr.append(el('td', null, esc(shape.name) + ` <small class="hint">per ${esc(shape.unitLabel)}</small>`));
+			for (const k of ['unitPrice', 'gbPrice']) {
+				tr.append(el('td', 'n', String(shape[k])));
+				const td = el('td', 'n' + (prof.shapes[key]?.[k] != null ? ' changed' : ''));
+				td.append(priceInput(prof.shapes[key]?.[k], shape[k], ro, (v) => {
+					const o = { ...(prof.shapes[key] || {}) };
+					if (v == null) delete o[k]; else o[k] = v;
+					if (Object.keys(o).length) prof.shapes[key] = o; else delete prof.shapes[key];
+					td.classList.toggle('changed', v != null);
+					profileEdited();
+				}));
+				tr.append(td);
+			}
+			t.append(tr);
+		}
+		for (const fee of provider.clusterFees || []) {
+			const key = `${provider.id}/${fee.id}`;
+			const tr = el('tr');
+			tr.append(el('td', null, esc(fee.name) + ' <small class="hint">per cluster-hr</small>'), el('td', 'n', String(fee.hourly)));
+			const td = el('td', 'n' + (prof.fees[key] != null ? ' changed' : ''));
+			td.append(priceInput(prof.fees[key], fee.hourly, ro, (v) => {
+				if (v == null) delete prof.fees[key]; else prof.fees[key] = v;
+				td.classList.toggle('changed', v != null);
+				profileEdited();
+			}));
+			tr.append(td, el('td'), el('td'));
+			t.append(tr);
+		}
+		root.append(t);
+	}
+}
+$('#edit-profiles').onclick = () => { editingId = activeProfile().id; renderProfileEditor(); dialog.showModal(); };
+$('#profiles-file').onchange = async (e) => {
+	const f = e.target.files[0]; e.target.value = '';
+	if (!f) return;
+	try {
+		const data = JSON.parse(await f.text());
+		const list = Array.isArray(data) ? data : [data];
+		if (!list.some(validProfile)) throw new Error('no price profiles in the file');
+		const added = mergeProfiles(list);
+		renderProfileSelect(); renderProfileEditor();
+		alert(`Imported ${added} profile${added === 1 ? '' : 's'}` + (added < list.length ? ` (${list.length - added} already here or invalid, left as they were)` : '') + '.');
+	} catch (err) { alert('Invalid profiles file: ' + err.message); }
+};
+
+function renderAll() { syncDiscount(); renderProfileSelect(); renderPools(); renderWorkloads(); renderResults(); }
 
 // ---------- toolbar ----------
 $('#add-pool').onclick = () => { plan.pools.push(newPool()); save(); renderAll(); };
@@ -386,7 +527,9 @@ $('#add-workload').onclick = () => { plan.workloads.push(newWorkload()); save();
 $('#reset').onclick = () => { if (confirm('Replace the current plan with the example?')) { plan = example(); save(); renderAll(); } };
 $('#export').onclick = () => {
 	const a = document.createElement('a');
-	a.href = URL.createObjectURL(new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' }));
+	const prof = activeProfile();
+	const out = prof.builtin ? plan : { ...plan, priceProfile: normProfile(prof) };
+	a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }));
 	a.download = 'nodepool-plan.json'; a.click();
 };
 $('#import').onclick = () => $('#file').click();
@@ -395,6 +538,11 @@ $('#file').onchange = async (e) => {
 	try {
 		const p = JSON.parse(await f.text());
 		if (!Array.isArray(p.pools) || !Array.isArray(p.workloads)) throw new Error('missing pools/workloads');
+		// A plan exported with a profile brings it along; one already here by that id is kept as is.
+		const keepProfile = plan.priceProfileId;
+		if (validProfile(p.priceProfile)) { mergeProfiles([p.priceProfile]); p.priceProfileId = p.priceProfile.id; }
+		delete p.priceProfile;
+		if (!p.priceProfileId) p.priceProfileId = keepProfile;
 		plan = p; save(); renderAll();
 	} catch (err) { alert('Invalid plan file: ' + err.message); }
 	e.target.value = '';

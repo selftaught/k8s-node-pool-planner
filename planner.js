@@ -1,6 +1,6 @@
 // Pure planning math: no DOM, no provider specifics beyond the provider objects passed in.
 // Units: CPU in millicores, memory in MiB. Node sizes arrive as vCPU / GB(=GiB).
-import { getProvider, getShape, nodeHourly, HOURS_PER_MONTH } from './providers/index.js';
+import { getProvider, getShape, nodeHourly, poolPrices, feeHourly, LIST_PROFILE, HOURS_PER_MONTH } from './providers/index.js';
 
 /** Replicas that exist. A workload with perApp > 0 scales with the plan's app count (when one is set). */
 export function totalReplicas(plan, w) {
@@ -104,21 +104,24 @@ export function pack(plan) {
 	return { caps, nodes: byPool, scheduled, unscheduled, unplaceable, extraNodes: extra };
 }
 
-/** Cost per pool + totals (monthly). */
-export function costs(plan) {
+/** Cost per pool + totals (monthly), at the given price profile (pool overrides win over it). */
+export function costs(plan, profile = LIST_PROFILE) {
 	const out = { pools: {}, clusterFees: [], monthly: 0, hourly: 0 };
 	for (const p of plan.pools) {
 		const provider = getProvider(p.providerId);
 		const shape = getShape(provider, p.shapeId);
 		const cap = poolCapacity(p);
-		const nodeH = nodeHourly(provider, shape, cap.vcpu, cap.memGB, { unitPrice: p.unitPrice, gbPrice: p.gbPrice });
+		const nodeH = nodeHourly(provider, shape, cap.vcpu, cap.memGB, poolPrices(p, profile));
 		out.pools[p.id] = { nodeHourly: nodeH, nodeMonthly: nodeH * HOURS_PER_MONTH, monthly: nodeH * HOURS_PER_MONTH * p.count, currency: provider.currency };
 		out.hourly += nodeH * p.count;
 	}
 	for (const providerId of new Set(plan.pools.map((p) => p.providerId))) {
 		const provider = getProvider(providerId);
 		const fee = provider.clusterFees?.find((f) => f.id === plan.clusterFees?.[providerId]) || provider.clusterFees?.[0];
-		if (fee) { out.clusterFees.push({ providerId, name: fee.name, monthly: fee.hourly * HOURS_PER_MONTH }); out.hourly += fee.hourly; }
+		if (fee) {
+			const hourly = feeHourly(provider, fee, profile);
+			out.clusterFees.push({ providerId, name: fee.name, monthly: hourly * HOURS_PER_MONTH }); out.hourly += hourly;
+		}
 	}
 	// Negotiated/committed discount off the whole bill (nodes and cluster fees), 0-100.
 	const d = Math.min(100, Math.max(0, Number(plan.discountPct) || 0)) / 100;
@@ -148,11 +151,11 @@ export function poolUsage(pool, packed) {
  * What a pool's hardware holds that no pod asks for, over the given nodes (pack() or minNodes() nodes).
  * overhead = system reserved + DaemonSets, which every node keeps and nothing can schedule on;
  * idle = allocatable that no pod requests. CPU in millicores, memory in MiB; costs are list $/month,
- * pricing a node's CPU and memory separately (unitPrice per OCPU, gbPrice per GB).
+ * pricing a node's CPU and memory separately (unitPrice per OCPU, gbPrice per GB) at the price profile.
  */
-export function poolWaste(pool, nodes) {
+export function poolWaste(pool, nodes, profile = LIST_PROFILE) {
 	const provider = getProvider(pool.providerId), shape = getShape(provider, pool.shapeId), cap = poolCapacity(pool);
-	const prices = { unitPrice: pool.unitPrice, gbPrice: pool.gbPrice };
+	const prices = poolPrices(pool, profile);
 	const perMilli = (nodeHourly(provider, shape, cap.vcpu, 0, prices) * HOURS_PER_MONTH) / (cap.cpu || 1);
 	const perMiB = (nodeHourly(provider, shape, 0, cap.memGB, prices) * HOURS_PER_MONTH) / (cap.mem || 1);
 	const n = nodes.length;

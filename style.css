@@ -40,5 +40,11 @@ th { color:var(--mute); font-weight:500; font-size:11px; text-transform:uppercas
 .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--mute); margin:6px 0 12px; } .legend span { display:inline-flex; gap:5px; align-items:center; }
 .disc { display:flex; align-items:center; gap:6px; color:var(--mute); } .disc input[type=range] { width:160px; padding:0; } .disc input[type=number] { width:64px; }
 
+dialog { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:16px 18px; width:min(900px, 94vw); max-height:88vh; }
+dialog::backdrop { background:rgba(0,0,0,.6); }
+dialog .row { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+dialog .row input[type=text] { width:260px; font-weight:600; }
+dialog td input { width:110px; text-align:right; }
+dialog td.changed input { border-color:var(--warn); }
 button.cta { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
 button.cta:hover { filter:brightness(1.1); }
