@@ -525,28 +525,70 @@ function renderAll() { syncDiscount(); renderProfileSelect(); renderPools(); ren
 $('#add-pool').onclick = () => { plan.pools.push(newPool()); save(); renderAll(); };
 $('#add-workload').onclick = () => { plan.workloads.push(newWorkload()); save(); renderAll(); };
 $('#reset').onclick = () => { if (confirm('Replace the current plan with the example?')) { plan = example(); save(); renderAll(); } };
+/** The plan as exported or shared: with its price profile when that is not the built-in one. */
+function portablePlan() {
+	const prof = activeProfile();
+	return prof.builtin ? plan : { ...plan, priceProfile: normProfile(prof) };
+}
+/** Replaces the plan with an exported or shared one. Throws when it is not a plan. */
+function loadPlan(p) {
+	if (!p || !Array.isArray(p.pools) || !Array.isArray(p.workloads)) throw new Error('missing pools/workloads');
+	// A plan exported with a profile brings it along; one already here by that id is kept as is.
+	const keepProfile = plan.priceProfileId;
+	if (validProfile(p.priceProfile)) { mergeProfiles([p.priceProfile]); p.priceProfileId = p.priceProfile.id; }
+	delete p.priceProfile;
+	if (!p.priceProfileId) p.priceProfileId = keepProfile;
+	plan = p; save(); renderAll();
+}
 $('#export').onclick = () => {
 	const a = document.createElement('a');
-	const prof = activeProfile();
-	const out = prof.builtin ? plan : { ...plan, priceProfile: normProfile(prof) };
-	a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }));
+	a.href = URL.createObjectURL(new Blob([JSON.stringify(portablePlan(), null, 2)], { type: 'application/json' }));
 	a.download = 'nodepool-plan.json'; a.click();
 };
 $('#import').onclick = () => $('#file').click();
 $('#file').onchange = async (e) => {
 	const f = e.target.files[0]; if (!f) return;
-	try {
-		const p = JSON.parse(await f.text());
-		if (!Array.isArray(p.pools) || !Array.isArray(p.workloads)) throw new Error('missing pools/workloads');
-		// A plan exported with a profile brings it along; one already here by that id is kept as is.
-		const keepProfile = plan.priceProfileId;
-		if (validProfile(p.priceProfile)) { mergeProfiles([p.priceProfile]); p.priceProfileId = p.priceProfile.id; }
-		delete p.priceProfile;
-		if (!p.priceProfileId) p.priceProfileId = keepProfile;
-		plan = p; save(); renderAll();
-	} catch (err) { alert('Invalid plan file: ' + err.message); }
+	try { loadPlan(JSON.parse(await f.text())); } catch (err) { alert('Invalid plan file: ' + err.message); }
 	e.target.value = '';
 };
+
+// ---------- share links ----------
+// The plan travels in the URL fragment (#plan=…), deflated and base64url-encoded. The fragment is
+// never sent to the server, so a shared plan stays out of its logs.
+const SHARE_PREFIX = '#plan=';
+async function encodePlan(p) {
+	const stream = new Blob([JSON.stringify(p)]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+	const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+	let bin = '';
+	for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function decodePlan(s) {
+	const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+	const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+	const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+	return JSON.parse(await new Response(stream).text());
+}
+$('#share').onclick = async () => {
+	const url = location.origin + location.pathname + SHARE_PREFIX + await encodePlan(portablePlan());
+	try {
+		await navigator.clipboard.writeText(url);
+		alert(`Link copied (${fmt(url.length)} characters). Opening it loads this plan, its settings and its price profile.`);
+	} catch {
+		prompt('Copy this link:', url);
+	}
+};
+/** Opens a shared plan from the URL, then drops the fragment so a reload keeps later edits. */
+async function loadSharedPlan() {
+	if (!location.hash.startsWith(SHARE_PREFIX)) return;
+	try {
+		loadPlan(await decodePlan(location.hash.slice(SHARE_PREFIX.length)));
+	} catch (err) {
+		alert('Could not open the shared plan: ' + err.message);
+	}
+	history.replaceState(null, '', location.pathname + location.search);
+}
+window.addEventListener('hashchange', loadSharedPlan);
 
 // ---------- presets.toml import ----------
 // Files are layered in the order picked (later wins, tables merge), like kapps-api's config layers.
@@ -586,3 +628,4 @@ $('#presets-file').onchange = async (e) => {
 };
 
 renderAll();
+loadSharedPlan();
